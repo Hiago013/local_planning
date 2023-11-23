@@ -37,7 +37,7 @@ class Dijkstra:
                 atual = pais[atual]
             bestPath[no].append(atual)
         return distancias, bestPath, pais
-    
+
     def getPath(self, no):
         '''
         This method returns the best path from the initial node to the given node.
