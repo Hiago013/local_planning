@@ -13,14 +13,53 @@ from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import Point
 import numpy as np
 
+from math import sqrt, acos
+from numpy import sign
+
+def create_shadow(x_position, y_position, velocity_x, velocity_y):
+    """
+    Creates a shadow of obstacles based on the given parameters.
+
+    :param x_position: The x-coordinate of the current position.
+    :param y_position: The y-coordinate of the current position.
+    :param velocity_x: The velocity in the x-direction.
+    :param velocity_y: The velocity in the y-direction.
+    :return: List of obstacle coordinates representing the shadow.
+    """
+    cell_size = 0.5
+
+    obstacle_list = [(x_position, y_position)]
+
+    is_highest_velocity = 1 if abs(velocity_x) > abs(velocity_y) else 0
+
+    highest_velocity = max(abs(velocity_x), abs(velocity_y))
+    lowest_velocity = min(abs(velocity_x), abs(velocity_y))
+    velocity_module = sqrt(highest_velocity**2 + lowest_velocity**2)
+
+    if highest_velocity == 0:
+        return obstacle_list
+
+    angle_theta = acos((highest_velocity)**2 / (highest_velocity * velocity_module)) * 180 / 3.1415
+
+    if 40 < angle_theta < 50:
+        obstacle_list.append((x_position + sign(velocity_x) * cell_size, y_position))
+        obstacle_list.append((x_position, y_position + sign(velocity_y) * cell_size))
+        obstacle_list.append((x_position + sign(velocity_x) * cell_size, y_position + sign(velocity_y) * cell_size))
+        return obstacle_list
+
+    if is_highest_velocity == 1:
+        obstacle_list.append((x_position + sign(velocity_x) * cell_size, y_position))
+    else:
+        obstacle_list.append((x_position, y_position + sign(velocity_y) * cell_size))
+
+    return obstacle_list
+
 def cell2position_simulator(cells):
     positions = []
     for cell in cells:
         i, j, k = cell2opt(8, 5, .5, cell)
         positions.append([i, j, k, 0, 3.1415/2, 0])
     np.savetxt('Mapa3.txt', np.array(positions))
-
-
 
 def opt2position(x_max :float, y_max:float, size:float, position:tuple)->tuple:
     n_cols = int(x_max / size)
@@ -42,13 +81,11 @@ def cell2opt(x_max:float, y_max:float, cell_size:float, cell:int):
     y_cell, x_cell=i,j
     return (cell_size * x_cell + cell_size/2, cell_size * y_cell + cell_size/2, 1)
 
-
-
 class MiniGrid(GridWorld):
     def __init__(self, rows, cols, height, start, Kd, Ks, Kt, Kg):
          super().__init__(rows, cols, height, start, Kd, Ks, Kt, Kg)
          self.initGrid=(0,0,0)
-         self.endGrid=(rows-1,cols-1,height-1)
+         self.endGrid=(rows-1, cols-1, height-1)
     def setPathGlobal(self, pathGlobal):
         self.pathGlobal = pathGlobal
 
@@ -149,17 +186,6 @@ class MiniGrid(GridWorld):
             i, j, _ = self.s2cart(obstacle)
             obstacle_matrix[i, j] = 0
         return obstacle_matrix[ii:ie+1, ji:je+1]
-
-
-    #def get_empty_cell_minigrid(self):
-    #    ii, ji, _ = self.initGrid
-    #    ie, je, _ = self.endGrid
-    #    nonobstacles = []
-    #    for i in range(ii, ie + 1):
-    #        for j in range(ji, je + 1):
-    #            if self.cart2s((i, j, 0)) not in self.get_obstacles():
-    #                nonobstacles.append(self.cart2s((i, j, 0)))
-    #    return nonobstacles
 
     def get_empty_cell_minigrid(self, init:tuple, end:tuple) -> list:
         ii, ji, _ = init
@@ -288,6 +314,7 @@ class local_planner:
         self.pub_dijkstra = rospy.Publisher('/DijkstraPath', Float64MultiArray, queue_size=1)
         self.opt_info = rospy.Subscriber('/B1/ObstaclePosition', Float64MultiArray, self.callback)
         self.uav_position = rospy.Subscriber('/B1/UAVposition', Point, self.callbackpos)
+        self.dynamic_pos = rospy.Subscriber('DynamicObstacle', Float64MultiArray, self.callback_dynamic)
         self.opt_pos = rospy.Subscriber('/OptPos', Point, self.callbackpos)
         self.flag = 0
         self.flag_minigrid = 0
@@ -302,6 +329,7 @@ class local_planner:
         self.log_local_grid_size = Float64MultiArray()
         self.log_local_goal = Float64MultiArray()
         self.dijkstra_path = Float64MultiArray()
+        self.dynamic_obstacles = Float64MultiArray()
 
 
         self._visited_states = list()
@@ -344,6 +372,9 @@ class local_planner:
         self.__create_our_agent()
         self.__train_agent()
 
+    def callback_dynamic(self, data:Float64MultiArray):
+        self.dynamic_obstacles = data
+
 
     def callbackpos(self, msg:Point):
         self.__current_position = msg
@@ -358,10 +389,25 @@ class local_planner:
             self.__train_agent()
 
 
+        ### Esta etapa é para previnir colisões durante o experimento, adicionando mais obstaculos
+        ### Na direção de movimento do robô
+        if len(self.dynamic_obstacles.data) > 0:
+            dynamic_aux = []
+            for i in range(0, len(self.dynamic_obstacles.data), 4):
+                x = self.dynamic_obstacles.data[i]
+                y = self.dynamic_obstacles.data[i+1]
+                vx = self.dynamic_obstacles.data[i+2]
+                vy = self.dynamic_obstacles.data[i+3]
+
+                #print(x, y, vx, vy)
+
+                print(create_shadow(x, y, vx, vy))
+
         x_max = 8
         y_max = 5
         cell_size = .5
         self.multi_array = data
+       # self.multi_array.data = tuple(list(self.multi_array.data) + list(self.dynamic_obstacles.data))
         state_list = list()
 
         for i in range(0, len(self.multi_array.data), 3):
@@ -700,7 +746,7 @@ class local_planner:
 
 if __name__ == '__main__':
     try:
-        a1 = local_planner(4, -.4, -.1, -.4, 100, alpha=.2, grid_size=5, numEpisode=2500)
+        a1 = local_planner(1, -.4, -.1, -.4, 100, alpha=.2, grid_size=5, numEpisode=2500)
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
